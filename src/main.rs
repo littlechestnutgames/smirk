@@ -36,6 +36,12 @@ impl SmirkMap {
     fn del(&mut self, key: &String) {
         self.map.remove(key);
     }
+    fn ttl(&self, key: &String) -> Result<Option<u64>, String> {
+        if let Some(record) = self.map.get(key) {
+            return Ok(record.get_ttl());
+        }
+        Err(format!("Key \"{}\" was not found", key))
+    }
     fn search_mode(&mut self, mode: SmirkSearchMode) {
         self.search_mode = mode;
     }
@@ -69,6 +75,9 @@ impl<T> RecordLike<T> for Record<T> {
                 .duration_since(self.ttl_start)
                 .unwrap_or_default()
                 .as_secs();
+            if duration >= ttl {
+                return Some(0);
+            }
             return Some(ttl - duration);
         }
         None
@@ -76,7 +85,7 @@ impl<T> RecordLike<T> for Record<T> {
 }
 
 fn main() {
-    let mut server_data = SmirkMap {
+    let server_data = SmirkMap {
         search_mode: SmirkSearchMode::Glob,
         map: HashMap::new()
     };
@@ -110,12 +119,7 @@ struct SmirkCommand {
 fn handle_client(mut stream: TcpStream, threadsafe_server_data: &Arc<Mutex<SmirkMap>>) {
     // Buffer to store incoming data from the client
     let mut buffer = [0; 512];
-    let allowed_commands = vec![
-        String::from("GET"),
-        String::from("SET"),
-        String::from("DEL"),
-        String::from("KEYS")
-    ];
+
     loop {
         match stream.read(&mut buffer) {
             Ok(bytes_read) => {
@@ -142,6 +146,41 @@ fn handle_client(mut stream: TcpStream, threadsafe_server_data: &Arc<Mutex<Smirk
                 commands.for_each(|c| {
                     let mut smirk_map = threadsafe_server_data.lock().unwrap();
                     match c.command.as_str() {
+                        "SAVE" => {
+                            stream.write_all("Saving a dump of all keys.".as_bytes()).unwrap();
+                        }
+                        "QUIT" => {
+                            stream.write_all("Bye.\n".as_bytes()).unwrap();
+                            let shutdown = stream.shutdown(std::net::Shutdown::Both);
+                            if let Err(e) = shutdown {
+                                stream.write_all(format!("Hmm. It seems like we're having problems shutting down the stream. {}", e).as_bytes()).unwrap();
+                            }
+                        }
+                        "TTL" => {
+                            // Get TTL
+                            if c.args.len() == 1 {
+                                let mut cmd_str = c.args.iter();
+                                let k = cmd_str.next().unwrap().as_str();
+                                let smttl = smirk_map.ttl(&String::from(k));
+                                match smttl {
+                                    Ok(option) => {
+                                        if let Some(o) = option {
+                                            stream.write_all(format!("{}\n", o).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" does not expire.\n", k).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    Err(_) => {
+                                        stream.write_all(format!("Key \"{}\" does not exist.\n", k).as_bytes()).unwrap();
+                                    }
+                                }
+                            }
+
+                            // Set TTL
+                            if c.args.len() == 2 {
+
+                            }
+                        }
                         "GET" => {
                             if c.args.len() == 2 {
                                 let mut type_key = c.args.iter();
@@ -170,41 +209,103 @@ fn handle_client(mut stream: TcpStream, threadsafe_server_data: &Arc<Mutex<Smirk
                                             stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
                                         }
                                     }
-                                    "i64" => { let data = smirk_map.get::<i64>(&key.to_owned()); }
-                                    "i128" => { let data = smirk_map.get::<i128>(&key.to_owned()); }
-                                    "u8" => { let data = smirk_map.get::<u8>(&key.to_owned()); }
-                                    "u16" => { let data = smirk_map.get::<u16>(&key.to_owned()); }
-                                    "u32" => { let data = smirk_map.get::<u32>(&key.to_owned()); }
+                                    "i64" => {
+                                        if let Some(data) = smirk_map.get::<i64>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "i128" => {
+                                        if let Some(data) = smirk_map.get::<i128>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "u8" => {
+                                        if let Some(data) = smirk_map.get::<u8>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "u16" => {
+                                        if let Some(data) = smirk_map.get::<u16>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "u32" => {
+                                        if let Some(data) = smirk_map.get::<u32>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
                                     "u64" => {
-                                        let data = smirk_map.get::<u64>(&key.to_owned());
+                                        if let Some(data) = smirk_map.get::<u64>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
                                     }
                                     "u128" => {
-                                        let data = smirk_map.get::<u128>(&key.to_owned());
+                                        if let Some(data) = smirk_map.get::<u128>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
                                     }
                                     "isize" => {
-                                        let data = smirk_map.get::<isize>(&key.to_owned());
-                                        if let Some(d) = data {
-
+                                        if let Some(data) = smirk_map.get::<isize>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
                                         } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
                                         }
                                     }
                                     "usize" => {
-                                        let data = smirk_map.get::<usize>(&key.to_owned());
+                                        if let Some(data) = smirk_map.get::<usize>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
                                     }
                                     "f32" => {
-                                        let data = smirk_map.get::<f32>(&key.to_owned());
+                                        if let Some(data) = smirk_map.get::<f32>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
                                     }
                                     "f64" => {
-                                        let data = smirk_map.get::<f64>(&key.to_owned());
+                                        if let Some(data) = smirk_map.get::<f64>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
                                     }
                                     "bool" => {
-                                        let data = smirk_map.get::<bool>(&key.to_owned());
+                                        if let Some(data) = smirk_map.get::<bool>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
                                     }
                                     "char" => {
-                                        let data = smirk_map.get::<char>(&key.to_owned());
+                                        if let Some(data) = smirk_map.get::<char>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
                                     }
                                     "String" => {
-                                        let data = smirk_map.get::<String>(&key.to_owned());
+                                        if let Some(data) = smirk_map.get::<String>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
                                     }
                                     _ => {
                                         if let Some(data) = smirk_map.get::<Vec<u8>>(&key.to_owned()) {
@@ -217,6 +318,156 @@ fn handle_client(mut stream: TcpStream, threadsafe_server_data: &Arc<Mutex<Smirk
 
                             } else {
                                 stream.write_all(b"Usage: GET <TYPE> <KEY>").unwrap();
+                            }
+                        }
+                        "SET" => {
+                            let c_args_len = c.args.len();
+                            if c.args.len() == 3 || c.args.len() == 4 {
+
+                                let mut type_key = c.args.iter();
+                                let t = type_key.next().unwrap().as_str();
+                                let key = type_key.next().unwrap();
+                                let value = type_key.next().unwrap();
+                                let ttl: Option<u64> = match c_args_len {
+                                    4 => {
+                                        if let Ok(num) = type_key.next().unwrap().parse::<u64>() {
+                                            Some(num)
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    _ => None
+                                };
+                                match t {
+                                    "i8" => {
+                                        if let Ok(data) = value.parse::<i8>() {
+                                            smirk_map.set::<i8>(&key, data, ttl);
+                                        } else {
+                                            stream.write_all(format!("Can't cast value \"{}\" as i8.\n", &value).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "i16" => {
+                                        if let Ok(data) = value.parse::<i16>() {
+                                            smirk_map.set::<i16>(&key, data, ttl);
+                                        } else {
+                                            stream.write_all(format!("Can't cast value \"{}\" as i16.\n", &value).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "i32" => {
+                                        if let Ok(data) = value.parse::<i32>() {
+                                            smirk_map.set::<i32>(&key, data, ttl);
+                                        } else {
+                                            stream.write_all(format!("Can't cast value \"{}\" as i32.\n", &value).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "i64" => {
+                                        if let Ok(data) = value.parse::<i64>() {
+                                            smirk_map.set::<i64>(&key, data, ttl);
+                                        } else {
+                                            stream.write_all(format!("Can't cast value \"{}\" as i64.\n", &value).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "i128" => {
+                                        if let Ok(data) = value.parse::<i128>() {
+                                            smirk_map.set::<i128>(&key, data, ttl);
+                                        } else {
+                                            stream.write_all(format!("Can't cast value \"{}\" as i128.\n", &value).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "u8" => {
+                                        if let Some(data) = smirk_map.get::<u8>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "u16" => {
+                                        if let Some(data) = smirk_map.get::<u16>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "u32" => {
+                                        if let Some(data) = smirk_map.get::<u32>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "u64" => {
+                                        if let Some(data) = smirk_map.get::<u64>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "u128" => {
+                                        if let Some(data) = smirk_map.get::<u128>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "isize" => {
+                                        if let Some(data) = smirk_map.get::<isize>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "usize" => {
+                                        if let Some(data) = smirk_map.get::<usize>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "f32" => {
+                                        if let Some(data) = smirk_map.get::<f32>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "f64" => {
+                                        if let Some(data) = smirk_map.get::<f64>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "bool" => {
+                                        if let Some(data) = smirk_map.get::<bool>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "char" => {
+                                        if let Some(data) = smirk_map.get::<char>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    "String" => {
+                                        if let Some(data) = smirk_map.get::<String>(&key.to_owned()) {
+                                            stream.write_all(format!("{}\n", data).as_bytes()).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                    _ => {
+                                        if let Some(data) = smirk_map.get::<Vec<u8>>(&key.to_owned()) {
+                                            stream.write_all(data).unwrap();
+                                        } else {
+                                            stream.write_all(format!("Key \"{}\" not found.\n", &key.to_owned()).as_bytes()).unwrap();
+                                        }
+                                    }
+                                };
+                            } else {
+                                stream.write_all(b"Usage: SET <TYPE> <KEY> <VALUE>").unwrap();
                             }
                         }
                         "DEL" => {
