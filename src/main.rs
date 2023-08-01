@@ -3,14 +3,24 @@ use std::{
     collections::HashMap,
     any::{Any, type_name},
     net::{TcpListener,TcpStream},
-    io::{Read, Write}, sync::{Arc, Mutex, MutexGuard}, fmt::Display, str::FromStr
+    io::{Write, BufReader, BufRead}, sync::{Arc, Mutex, MutexGuard}, fmt::Display, str::FromStr
 };
 
 use regex::Regex;
 
+#[derive(Debug)]
 enum SmirkSearchMode {
     Glob,
     Regex
+}
+
+impl SmirkSearchMode {
+    fn from_ref(mode: &SmirkSearchMode) -> SmirkSearchMode {
+        match mode {
+            Self::Glob => Self::Glob,
+            Self::Regex => Self::Regex
+        }
+    }
 }
 
 struct SmirkMap {
@@ -20,8 +30,6 @@ struct SmirkMap {
 
 enum SmirkError {
     KeyNotFound(String),
-    TypeMistmatch(String),
-
 }
 
 impl SmirkMap {
@@ -73,14 +81,24 @@ impl SmirkMap {
         }
         Err(SmirkError::KeyNotFound(key.clone()))
     }
-    fn del(&mut self, key: &String) {
-        self.map.remove(key);
+    fn del(&mut self, key: &String) -> u64 {
+        if self.map.contains_key(key) {
+            self.map.remove(key);
+            1
+        } else {
+            0
+        }
     }
     fn ttl(&self, key: &String) -> Result<Option<u64>, String> {
         if let Some(record) = self.map.get(key) {
             return Ok(record.get_ttl());
         }
         Err(format!("Key \"{}\" was not found", key))
+    }
+    fn set_ttl(&mut self, key: &String, ttl: &u64) {
+        if let Some(record) = self.map.get_mut(key) {
+            record.ttl = Some(*ttl);
+        }
     }
     fn search_mode(&mut self, mode: SmirkSearchMode) {
         self.search_mode = mode;
@@ -127,9 +145,110 @@ impl<T> RecordLike<T> for Record<T> {
     }
 }
 
-struct SmirkCommand {
-    command: String,
-    args: Vec<String>
+#[derive(Debug)]
+enum Command {
+    Set(String, String, String),
+    Get(String, String),
+    Del(Vec<String>),
+    Keys(String),
+    Mode(SmirkSearchMode),
+    TtlGet(String),
+    TtlSet(String, u64),
+    Exists(String),
+    Type(String),
+    Quit,
+    Save
+}
+
+#[derive(Debug)]
+enum CommandError {
+    NoInput,
+    ArgumentMismatch,
+    Unknown,
+    NoValidModeSpecified,
+    InvalidTtlSpecified
+}
+
+impl FromStr for Command {
+    type Err = CommandError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let tokens: Vec<&str> = s.trim().split_whitespace().collect();
+        if tokens.is_empty() {
+            return Err(CommandError::NoInput);
+        }
+
+        let tok_len = tokens.len();
+        match tokens[0].to_uppercase().as_str() {
+            "SET" => {
+                if tok_len < 4 {
+                    return Err(CommandError::ArgumentMismatch);
+                }
+                Ok(Command::Set(tokens[1].to_string(), tokens[2].to_string(), tokens[3..].join(" ").to_string()))
+            }
+            "GET" => {
+                if tok_len != 3 {
+                    return Err(CommandError::ArgumentMismatch);
+                }
+                Ok(Command::Get(tokens[1].to_string(), tokens[2].to_string()))
+            }
+            "DEL" => {
+                if tok_len < 2 {
+                    return Err(CommandError::ArgumentMismatch);
+                }
+                Ok(Command::Del(tokens[1..].into_iter().map(|a| {a.to_string()}).collect()))
+            }
+            "KEYS" => {
+                if tok_len != 2 {
+                    return Err(CommandError::ArgumentMismatch);
+                }
+                Ok(Command::Keys(tokens[1].to_string()))
+            }
+            "MODE" => {
+                if tok_len != 2 {
+                    return Err(CommandError::ArgumentMismatch);
+                }
+                match tokens[1].to_uppercase().as_str() {
+                    "GLOB" => Ok(Command::Mode(SmirkSearchMode::Glob)),
+                    "REGEX" => Ok(Command::Mode(SmirkSearchMode::Regex)),
+                    _ => Err(CommandError::NoValidModeSpecified)
+                }
+            }
+            "TTL" => {
+                match tok_len {
+                    2 => Ok(Command::TtlGet(tokens[1].to_string())),
+                    3 => {
+                        let ttl = tokens[2].to_owned().parse::<u64>();
+                        if let Ok(ttl) = ttl {
+                            Ok(Command::TtlSet(tokens[1].to_string(), ttl))
+                        } else {
+                            Err(CommandError::InvalidTtlSpecified)
+                        }
+                    }
+                    _ => Err(CommandError::ArgumentMismatch)
+                }
+            }
+            "EXISTS" => {
+                if tok_len != 2 {
+                    return Err(CommandError::ArgumentMismatch);
+                }
+                Ok(Command::Exists(tokens[1].to_string()))
+            }
+            "TYPE" => {
+                if tok_len != 2 {
+                    return Err(CommandError::ArgumentMismatch);
+                }
+                Ok(Command::Type(tokens[1].to_string()))
+            }
+            "QUIT" => {
+                Ok(Command::Quit)
+            }
+            "SAVE" => {
+                Ok(Command::Save)
+            }
+            _ => Err(CommandError::Unknown)
+        }
+    }
 }
 
 fn main() {
@@ -144,6 +263,7 @@ fn main() {
     let threadsafe_server_data = Arc::new(Mutex::new(server_data));
 
     for stream in listener.incoming() {
+
         match stream {
             Ok(stream) => {
                 println!("New client connected: {:?}", stream.peer_addr());
@@ -188,286 +308,163 @@ fn set_value_and_write_to_stream<T: Display + Send + FromStr + 'static>(
     }
 }
 
-fn handle_client(mut stream: TcpStream, threadsafe_server_data: &Arc<Mutex<SmirkMap>>) {
-    // Buffer to store incoming data from the client
-    let mut buffer = [0; 512];
-
-    loop {
-        match stream.read(&mut buffer) {
-            Ok(bytes_read) => {
-                if bytes_read == 0 {
-                    break;
+fn process_command(stream: &mut TcpStream, command: &Command, smirk_map: &mut MutexGuard<SmirkMap>) {
+    match command {
+        Command::Set(t, k, v) => {
+            match t.as_str() {
+                "i8" => { set_value_and_write_to_stream::<i8>(stream, smirk_map, k, v, t); }
+                "i16" => { set_value_and_write_to_stream::<i16>(stream, smirk_map, k, v, t); }
+                "i32" => { set_value_and_write_to_stream::<i32>(stream, smirk_map, k, v, t); }
+                "i64" => { set_value_and_write_to_stream::<i64>(stream, smirk_map, k, v, t); }
+                "i128" => { set_value_and_write_to_stream::<i128>(stream, smirk_map, k, v, t); }
+                "u8" => { set_value_and_write_to_stream::<u8>(stream, smirk_map, k, v, t); }
+                "u16" => { set_value_and_write_to_stream::<u16>(stream, smirk_map, k, v, t); }
+                "u32" => { set_value_and_write_to_stream::<u32>(stream, smirk_map, k, v, t); }
+                "u64" => { set_value_and_write_to_stream::<u64>(stream, smirk_map, k, v, t); }
+                "u128" => { set_value_and_write_to_stream::<u128>(stream, smirk_map, k, v, t); }
+                "isize" => { set_value_and_write_to_stream::<isize>(stream, smirk_map, k, v, t); }
+                "usize" => { set_value_and_write_to_stream::<usize>(stream, smirk_map, k, v, t); }
+                "f32" => { set_value_and_write_to_stream::<f32>(stream, smirk_map, k, v, t); }
+                "f64" => { set_value_and_write_to_stream::<f64>(stream, smirk_map, k, v, t); }
+                "bool" => { set_value_and_write_to_stream::<bool>(stream, smirk_map, k, v, t); }
+                "char" => { set_value_and_write_to_stream::<char>(stream, smirk_map, k, v, t); }
+                _ => { set_value_and_write_to_stream::<String>(stream, smirk_map, k, v, t); }
+            }
+        }
+        Command::Get(t, k) => {
+            match t.as_str() {
+                "i8" => { get_value_and_write_to_stream::<i8>(stream, &smirk_map, k); }
+                "i16" => { get_value_and_write_to_stream::<i16>(stream, &smirk_map, k); }
+                "i32" => { get_value_and_write_to_stream::<i32>(stream, &smirk_map, k); }
+                "i64" => { get_value_and_write_to_stream::<i64>(stream, &smirk_map, k); }
+                "i128" => { get_value_and_write_to_stream::<i128>(stream, &smirk_map, k); }
+                "u8" => { get_value_and_write_to_stream::<u8>(stream, &smirk_map, k); }
+                "u16" => { get_value_and_write_to_stream::<u16>(stream, &smirk_map, k); }
+                "u32" => { get_value_and_write_to_stream::<u32>(stream, &smirk_map, k); }
+                "u64" => { get_value_and_write_to_stream::<u64>(stream, &smirk_map, k); }
+                "u128" => { get_value_and_write_to_stream::<u128>(stream, &smirk_map, k); }
+                "isize" => { get_value_and_write_to_stream::<isize>(stream, &smirk_map, k); }
+                "usize" => { get_value_and_write_to_stream::<usize>(stream, &smirk_map, k); }
+                "f32" => { get_value_and_write_to_stream::<f32>(stream, &smirk_map, k); }
+                "f64" => { get_value_and_write_to_stream::<f64>(stream, &smirk_map, k); }
+                "bool" => { get_value_and_write_to_stream::<bool>(stream, &smirk_map, k); }
+                "char" => { get_value_and_write_to_stream::<char>(stream, &smirk_map, k); }
+                _ => { get_value_and_write_to_stream::<String>(stream, &smirk_map, k); }
+            }
+        }
+        Command::Del(keys) => {
+            let deleted: u64 = keys.into_iter().map(|k| smirk_map.del(k)).sum();
+            stream.write_all(format!("{}", deleted).as_bytes()).unwrap();
+        }
+        Command::Keys(key) => {
+            match smirk_map.search_mode {
+                SmirkSearchMode::Glob => {
+                    let pattern = glob::Pattern::new(key).unwrap();
+                    let matching_keys: Vec<String> = smirk_map
+                        .map.keys().into_iter()
+                        .filter(|k| pattern.matches(k))
+                        .cloned()
+                        .collect();
+                    if matching_keys.len() == 0 {
+                        stream.write_all(format!("No matches for key query \"{}\" were found.\n", key).as_bytes()).unwrap();
+                    } else {
+                        let matched = matching_keys.join("\n");
+                        stream.write_all(format!("{}\n", matched).as_bytes()).unwrap();
+                    }
                 }
-
-                let received_data = String::from_utf8_lossy(&buffer[..bytes_read]);
-                let commands = received_data.lines().map(|m| {
-                    let mut items = m.split_whitespace();
-                    let mut command = "";
-                    let mut args = Vec::<String>::new();
-
-                    if let Some(c) = items.next() {
-                        command = c;
-                        args = items.map(|i| { i.to_owned() }).collect();
+                SmirkSearchMode::Regex => {
+                    let pattern = Regex::new(key).unwrap();
+                    let matching_keys: Vec<String> = smirk_map
+                        .map.keys().into_iter()
+                        .filter(|k| pattern.is_match(k))
+                        .cloned()
+                        .collect();
+                    if matching_keys.len() == 0 {
+                        stream.write_all(format!("No matches for key query \"{}\" were found.\n", key).as_bytes()).unwrap();
+                    } else {
+                        let matched = matching_keys.join("\n");
+                        stream.write_all(format!("{}\n", matched).as_bytes()).unwrap();
                     }
-                    return SmirkCommand {
-                        command: command.to_owned(),
-                        args
+                }
+            }
+        }
+        Command::Mode(mode) => {
+            smirk_map.search_mode(SmirkSearchMode::from_ref(mode));
+        }
+        Command::TtlSet(key, ttl) => {
+            smirk_map.set_ttl(key, ttl);
+        }
+        Command::TtlGet(key) => {
+            let smttl = smirk_map.ttl(&String::from(key));
+            match smttl {
+                Ok(option) => {
+                    if let Some(o) = option {
+                        stream.write_all(format!("{}\n", o).as_bytes()).unwrap();
+                    } else {
+                        stream.write_all(format!("Key \"{}\" does not expire.\n", key).as_bytes()).unwrap();
                     }
-                });
-
-                commands.for_each(|c| {
-                    let mut smirk_map = threadsafe_server_data.lock().unwrap();
-                    match c.command.to_uppercase().as_str() {
-                        "SAVE" => {
-                            stream.write_all("Saving a dump of all keys.".as_bytes()).unwrap();
-                            todo!();
-                        }
-                        "QUIT" => {
-                            stream.write_all("Bye.\n".as_bytes()).unwrap();
-                            let shutdown = stream.shutdown(std::net::Shutdown::Both);
-                            if let Err(e) = shutdown {
-                                stream.write_all(format!("Hmm. It seems like we're having problems shutting down the stream. {}", e).as_bytes()).unwrap();
-                            }
-                        }
-                        "TTL" => {
-                            // Get TTL
-                            if c.args.len() == 1 {
-                                let mut cmd_str = c.args.iter();
-                                let k = cmd_str.next().unwrap().as_str();
-                                let smttl = smirk_map.ttl(&String::from(k));
-                                match smttl {
-                                    Ok(option) => {
-                                        if let Some(o) = option {
-                                            stream.write_all(format!("{}\n", o).as_bytes()).unwrap();
-                                        } else {
-                                            stream.write_all(format!("Key \"{}\" does not expire.\n", k).as_bytes()).unwrap();
-                                        }
-                                    }
-                                    Err(_) => {
-                                        stream.write_all(format!("Key \"{}\" does not exist.\n", k).as_bytes()).unwrap();
-                                    }
-                                }
-                            }
-
-                            // Set TTL
-                            if c.args.len() == 2 {
-
-                            }
-                        }
-                        "GET" => {
-                            if c.args.len() == 2 {
-                                let mut type_key = c.args.iter();
-                                let t = type_key.next().unwrap().as_str();
-                                let key = type_key.next().unwrap();
-
-                                match t {
-                                    "i8" => {
-                                        get_value_and_write_to_stream::<i8>(&mut stream, &smirk_map, key);
-                                    }
-                                    "i16" => {
-                                        get_value_and_write_to_stream::<i16>(&mut stream, &smirk_map, key);
-                                    }
-                                    "i32" => {
-                                        get_value_and_write_to_stream::<i32>(&mut stream, &smirk_map, key);
-                                    }
-                                    "i64" => {
-                                        get_value_and_write_to_stream::<i64>(&mut stream, &smirk_map, key);
-                                    }
-                                    "i128" => {
-                                        get_value_and_write_to_stream::<i128>(&mut stream, &smirk_map, key);
-                                    }
-                                    "u8" => {
-                                        get_value_and_write_to_stream::<u8>(&mut stream, &smirk_map, key);
-                                    }
-                                    "u16" => {
-                                        get_value_and_write_to_stream::<u16>(&mut stream, &smirk_map, key);
-                                    }
-                                    "u32" => {
-                                        get_value_and_write_to_stream::<u32>(&mut stream, &smirk_map, key);
-                                    }
-                                    "u64" => {
-                                        get_value_and_write_to_stream::<u64>(&mut stream, &smirk_map, key);
-                                    }
-                                    "u128" => {
-                                        get_value_and_write_to_stream::<u128>(&mut stream, &smirk_map, key);
-                                    }
-                                    "isize" => {
-                                        get_value_and_write_to_stream::<isize>(&mut stream, &smirk_map, key);
-                                    }
-                                    "usize" => {
-                                        get_value_and_write_to_stream::<usize>(&mut stream, &smirk_map, key);
-                                    }
-                                    "f32" => {
-                                        get_value_and_write_to_stream::<f32>(&mut stream, &smirk_map, key);
-                                    }
-                                    "f64" => {
-                                        get_value_and_write_to_stream::<f64>(&mut stream, &smirk_map, key);
-                                    }
-                                    "bool" => {
-                                        get_value_and_write_to_stream::<bool>(&mut stream, &smirk_map, key);
-                                    }
-                                    "char" => {
-                                        get_value_and_write_to_stream::<char>(&mut stream, &smirk_map, key);
-                                    }
-                                    _ => {
-                                        get_value_and_write_to_stream::<String>(&mut stream, &smirk_map, key);
-                                    }
-                                };
-
-                            } else {
-                                stream.write_all(b"Usage: GET <TYPE> <KEY>").unwrap();
-                            }
-                        }
-                        "SET" => {
-                            if c.args.len() == 3 {
-                                let mut type_key = c.args.into_iter();
-                                let t = type_key.next().unwrap();
-                                let key = type_key.next().unwrap();
-                                let value = type_key.next().unwrap();
-                                match t.as_str() {
-                                    "i8" => {
-                                        set_value_and_write_to_stream::<i8>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "i16" => {
-                                        set_value_and_write_to_stream::<i16>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "i32" => {
-                                        set_value_and_write_to_stream::<i32>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "i64" => {
-                                        set_value_and_write_to_stream::<i64>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "i128" => {
-                                        set_value_and_write_to_stream::<i128>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "u8" => {
-                                        set_value_and_write_to_stream::<u8>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "u16" => {
-                                        set_value_and_write_to_stream::<u16>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "u32" => {
-                                        set_value_and_write_to_stream::<u32>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "u64" => {
-                                        set_value_and_write_to_stream::<u64>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "u128" => {
-                                        set_value_and_write_to_stream::<u128>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "isize" => {
-                                        set_value_and_write_to_stream::<isize>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "usize" => {
-                                        set_value_and_write_to_stream::<usize>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "f32" => {
-                                        set_value_and_write_to_stream::<f32>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "f64" => {
-                                        set_value_and_write_to_stream::<f64>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "bool" => {
-                                        set_value_and_write_to_stream::<bool>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    "char" => {
-                                        set_value_and_write_to_stream::<char>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                    _ => {
-                                        set_value_and_write_to_stream::<String>(&mut stream, &mut smirk_map, &key, &value, &t);
-                                    }
-                                };
-                            } else {
-                                stream.write_all(b"Usage: SET <TYPE> <KEY> <VALUE>\n").unwrap();
-                            }
-                        }
-                        "DEL" => {
-                            c.args.into_iter().for_each(|k| { smirk_map.del(&k); });
-                        }
-                        "MODE" => {
-                            let mut type_key = c.args.iter();
-                            let mode = type_key.next().unwrap().as_str().to_uppercase();
-                            let message: Result<SmirkSearchMode, String> = match mode.as_str() {
-                                "GLOB" => Ok(SmirkSearchMode::Glob),
-                                "REGEX" => Ok(SmirkSearchMode::Regex),
-                                _ => Err("Usage: MODE Regex or MODE Glob. Glob is the default.".to_owned())
-                            };
-
-                            if let Ok(m) = message {
-                                smirk_map.search_mode(m);
-                                stream.write_all(format!("Search mode updated to \"{}\".", mode).as_bytes()).unwrap();
-                            }
-                            else if let Err(m) = message {
-                                stream.write_all(format!("{}\n", m).as_bytes()).unwrap();
-                            }
-                        }
-                        "EXISTS" => {
-
-                            let mut type_key = c.args.iter();
-                            let key = type_key.next().unwrap().as_str();
-                            let exists = smirk_map.exists(&String::from(key));
-                            stream.write_all(format!("{}\n", exists).as_bytes()).unwrap();
-                        }
-                        "TYPE" => {
-                            let mut type_key = c.args.iter();
-                            let key = type_key.next().unwrap().as_str();
-                            let result = smirk_map.get_record(&String::from(key));
-                            if let Ok(record) = result {
-                                stream.write_all(
-                                    format!(
-                                        "Stored-Type: {}, User-Type: {}\n",
-                                        record.type_name.clone(),
-                                        record.requested_type_name.clone()
-                                    ).as_bytes()
-                                ).unwrap();
-                            } else if let Err(s) = result {
-                                match s {
-                                    SmirkError::KeyNotFound(err) => {
-                                        stream.write_all(format!("{}\n", err).as_bytes()).unwrap();
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        "KEYS" => {
-                            let mut type_key = c.args.iter();
-                            let key = type_key.next().unwrap().as_str();
-                            match smirk_map.search_mode {
-                               SmirkSearchMode::Glob => {
-                                   let pattern = glob::Pattern::new(key).unwrap();
-                                   let matching_keys: Vec<String> = smirk_map
-                                       .map.keys().into_iter()
-                                       .filter(|k| pattern.matches(k))
-                                       .cloned()
-                                       .collect();
-                                   if matching_keys.len() == 0 {
-                                    stream.write_all(format!("No matches for key query \"{}\" were found.\n", key).as_bytes()).unwrap();
-                                   } else {
-                                    let matched = matching_keys.join("\n");
-                                    stream.write_all(format!("{}\n", matched).as_bytes()).unwrap();
-                                   }
-                               }
-                               SmirkSearchMode::Regex => {
-                                let pattern = Regex::new(key).unwrap();
-                                let matching_keys: Vec<String> = smirk_map
-                                    .map.keys().into_iter()
-                                    .filter(|k| pattern.is_match(k))
-                                    .cloned()
-                                    .collect();
-                                if matching_keys.len() == 0 {
-                                    stream.write_all(format!("No matches for key query \"{}\" were found.\n", key).as_bytes()).unwrap();
-                                } else {
-                                    let matched = matching_keys.join("\n");
-                                    stream.write_all(format!("{}\n", matched).as_bytes()).unwrap();
-                                }
-                               }
-                            }
-                        },
-                        _ => {
-                            stream.write_all(format!("Command \"{}\" not recognized.\n", c.command).as_bytes()).unwrap()
-                        }
+                }
+                Err(_) => {
+                    stream.write_all(format!("Key \"{}\" does not exist.\n", key).as_bytes()).unwrap();
+                }
+            }
+        }
+        Command::Exists(key) => {
+            let exists = smirk_map.exists(key);
+            stream.write_all(format!("{}\n", exists).as_bytes()).unwrap();
+        }
+        Command::Type(key) => {
+            let result = smirk_map.get_record(&String::from(key));
+            if let Ok(record) = result {
+                stream.write_all(
+                    format!(
+                        "Stored-Type: {}, User-Type: {}\n",
+                        record.type_name.clone(),
+                        record.requested_type_name.clone()
+                        ).as_bytes()
+                    ).unwrap();
+            } else if let Err(s) = result {
+                match s {
+                    SmirkError::KeyNotFound(err) => {
+                        stream.write_all(format!("{}\n", err).as_bytes()).unwrap();
                     }
-                });
+                }
+            }
+        }
+        Command::Save => {
+            stream.write_all("Saving a dump of all keys.".as_bytes()).unwrap();
+            todo!();
+        }
+        Command::Quit => {
+            stream.write_all("Bye.\n".as_bytes()).unwrap();
+            let shutdown = stream.shutdown(std::net::Shutdown::Both);
+            if let Err(e) = shutdown {
+                stream.write_all(format!("Hmm. It seems like we're having problems shutting down the stream. {}", e).as_bytes()).unwrap();
+            }
+        }
+    }
+}
+
+fn handle_client(stream: TcpStream, threadsafe_server_data: &Arc<Mutex<SmirkMap>>) {
+    let mut bufreader = BufReader::new(&stream);
+
+    let mut smirk_map = threadsafe_server_data.lock().unwrap();
+    loop {
+        let mut line = String::new();
+
+        match bufreader.read_line(&mut line) {
+            Ok(0) => {
+                break;
+            }
+            Ok(_) => {
+                let cmd = Command::from_str(line.as_str());
+
+                if let Ok(cmd) = cmd {
+                    let mut sclone = stream.try_clone().unwrap();
+                    process_command(&mut sclone, &cmd, &mut smirk_map);
+                } else if let Err(cmd_err) = cmd {
+                    println!("{:?}", cmd_err);
+                }
             }
             Err(e) => {
                 eprintln!("Error reading from socket: {}", e);
