@@ -28,8 +28,54 @@ struct SmirkMap {
     map: HashMap<String, Record<Box<dyn Any + Send>>>
 }
 
-enum SmirkError {
+enum SmirkMessages {
+    /// Positive Messages :)
+    SetKey(String, String, String),
+    /// Negative Messages :(
+
+    /// The key wasn't found in the SmirkMap.
+    ///
+    /// `String` is the map key.
     KeyNotFound(String),
+
+    /// This means the value stored in key `param1`
+    ///
+    ///
+    TypeMismatch(String, String),
+
+    ParseError(String, String, String)
+}
+
+impl ToString for SmirkMessages {
+    fn to_string(&self) -> String {
+        match self {
+            SmirkMessages::SetKey(
+                key,
+                registered_type_name,
+                desired_type_name
+            ) => format!(
+                "Set key \"{}\" successfully. Stored-Type: {}, User-Type: {}\n",
+                key,
+                registered_type_name,
+                desired_type_name
+            ),
+            SmirkMessages::KeyNotFound(key) => format!(
+                "Key \"{}\" not found.\n",
+                key
+            ),
+            Self::TypeMismatch(key, desired_type) => format!(
+                "Couldn't downcast the value stored in key \"{}\" to type \"{}\".\n",
+                key,
+                desired_type
+            ),
+            Self::ParseError(key, value, desired_type) => format!(
+                "Setting key \"{}\" failed. Could not parse \"{}\" into \"{}\".\n",
+                key,
+                value,
+                desired_type
+            )
+        }
+    }
 }
 
 impl SmirkMap {
@@ -44,15 +90,15 @@ impl SmirkMap {
     /// * `Ok(&T)`: Returns &T, if key exists and is able to be downcast as T
     ///
     /// * `Err(String)`: The error message.
-    fn get<'a, T: 'static>(&'a self, key: &String) -> Result<&'a T, String> {
+    fn get<'a, T: 'static>(&'a self, key: &String) -> Result<&'a T, SmirkMessages> {
         if let Some(record) = self.map.get(key) {
             if let Some(real_value) = record.value.downcast_ref::<T>() {
                 return Ok(real_value);
             }
-            return Err(format!("Key \"{}\" found, but can not be downcast to \"{}\".\n", key, type_name::<T>()));
+            return Err(SmirkMessages::TypeMismatch(String::from(key), type_name::<T>().to_string()));
         }
 
-        return Err(format!("Key not found: \"{}\"\n", key));
+        return Err(SmirkMessages::KeyNotFound(String::from(key)));
     }
 
     /// Sets a value in the SmirkMap at key.
@@ -62,24 +108,42 @@ impl SmirkMap {
     /// * `key`: A `&String` representing the key to be fetched.
     ///
     /// * `value`: A `T` value to be stored in the map with `key`.
-    fn set<'a, T: 'static + Send>(&mut self, key: &String, value: T, requested_type_name: &String) {
-        let record: Record<Box<dyn Any + Send>> = Record {
-            value: Box::new(value),
-            ttl: None,
-            ttl_start: SystemTime::now(),
-            type_name: String::from(type_name::<T>()),
-            requested_type_name: String::from(requested_type_name)
-        };
-        self.map.insert(key.to_owned(), record);
+    fn set<'a, T: 'static + FromStr + Send>(
+        &mut self,
+        key: &String,
+        value: String,
+        desired_type_name: &String
+    ) -> Result<SmirkMessages, SmirkMessages>{
+        let parsed_value = value.parse::<T>();
+        if let Ok(value) = parsed_value {
+            let record: Record<Box<dyn Any + Send>> = Record {
+                value: Box::new(value),
+                ttl: None,
+                ttl_start: SystemTime::now(),
+                type_name: String::from(type_name::<T>()),
+                desired_type_name: String::from(desired_type_name)
+            };
+            self.map.insert(key.to_owned(), record);
+        } else if let Err(_) = parsed_value {
+            return Err(SmirkMessages::ParseError(String::from(key), value, String::from(type_name::<T>())));
+        }
+        return Ok(
+            SmirkMessages::SetKey(
+                String::from(key),
+                String::from(type_name::<T>()),
+                String::from(desired_type_name)
+            )
+        );
     }
     fn exists(&self, key: &String) -> bool {
         return self.map.contains_key(key);
     }
-    fn get_record(&self, key: &String) -> Result<&Record<Box<dyn Any + Send>>, SmirkError> {
+    fn get_record(&self, key: &String) -> Result<&Record<Box<dyn Any + Send>>, SmirkMessages> {
         if self.exists(key) {
             return Ok(self.map.get(key).unwrap());
         }
-        Err(SmirkError::KeyNotFound(key.clone()))
+
+        Err(SmirkMessages::KeyNotFound(key.clone()))
     }
     fn del(&mut self, key: &String) -> u64 {
         if self.map.contains_key(key) {
@@ -110,7 +174,7 @@ struct Record<T> {
     ttl: Option<u64>,
     ttl_start: SystemTime,
     type_name: String,
-    requested_type_name: String
+    desired_type_name: String
 }
 
 trait RecordLike<T> {
@@ -288,7 +352,7 @@ fn get_value_and_write_to_stream<T: Display + 'static>(
     if let Ok(d) = result {
         stream.write_all(format!("{}\n", d).as_bytes()).unwrap();
     } else if let Err(s) = result {
-        stream.write_all(s.as_bytes()).unwrap();
+        stream.write_all(s.to_string().as_bytes()).unwrap();
     }
 }
 
@@ -297,14 +361,13 @@ fn set_value_and_write_to_stream<T: Display + Send + FromStr + 'static>(
     smirk_map: &mut MutexGuard<'_, SmirkMap>,
     key: &String,
     value: &String,
-    requested_type_name: &String
+    desired_type_name: &String
 ) {
-    let parsed_value = value.parse::<T>();
-    if let Ok(v) = parsed_value {
-        smirk_map.set::<T>(key, v, requested_type_name);
-        stream.write_all(format!("Set \"{}\" successfully. Stored-Type: {}, User-Type: {}\n", key, std::any::type_name::<T>(), requested_type_name).as_bytes()).unwrap();
-    } else if let Err(_) = parsed_value {
-        stream.write_all(format!("Failed to parse value for key \"{}\" as \"{}\"", key, std::any::type_name::<T>()).as_bytes()).unwrap();
+    let result = smirk_map.set::<T>(key, String::from(value), desired_type_name);
+    if let Ok(success) = result {
+        stream.write_all(success.to_string().as_bytes()).unwrap();
+    } else if let Err(e) = result {
+        stream.write_all(e.to_string().as_bytes()).unwrap();
     }
 }
 
@@ -420,15 +483,11 @@ fn process_command(stream: &mut TcpStream, command: &Command, smirk_map: &mut Mu
                     format!(
                         "Stored-Type: {}, User-Type: {}\n",
                         record.type_name.clone(),
-                        record.requested_type_name.clone()
+                        record.desired_type_name.clone()
                         ).as_bytes()
                     ).unwrap();
             } else if let Err(s) = result {
-                match s {
-                    SmirkError::KeyNotFound(err) => {
-                        stream.write_all(format!("{}\n", err).as_bytes()).unwrap();
-                    }
-                }
+                stream.write_all(s.to_string().as_bytes()).unwrap();
             }
         }
         Command::Save => {
