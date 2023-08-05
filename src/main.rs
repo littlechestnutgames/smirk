@@ -159,9 +159,9 @@ impl SmirkMap {
         }
         Err(format!("Key \"{}\" was not found", key))
     }
-    fn set_ttl(&mut self, key: &String, ttl: &u64) {
+    fn set_ttl(&mut self, key: &String, ttl: &Option<u64>) {
         if let Some(record) = self.map.get_mut(key) {
-            record.ttl = Some(*ttl);
+            record.ttl = *ttl;
         }
     }
     fn search_mode(&mut self, mode: SmirkSearchMode) {
@@ -217,7 +217,7 @@ enum Command {
     Keys(String),
     Mode(SmirkSearchMode),
     TtlGet(String),
-    TtlSet(String, u64),
+    TtlSet(String, Option<u64>),
     Exists(String),
     Type(String),
     Quit,
@@ -284,11 +284,17 @@ impl FromStr for Command {
                     3 => {
                         let ttl = tokens[2].to_owned().parse::<u64>();
                         if let Ok(ttl) = ttl {
-                            Ok(Command::TtlSet(tokens[1].to_string(), ttl))
+                            Ok(Command::TtlSet(tokens[1].to_string(), Some(ttl)))
                         } else {
                             Err(CommandError::InvalidTtlSpecified)
                         }
                     }
+                    _ => Err(CommandError::ArgumentMismatch)
+                }
+            }
+            "DELTTL" => {
+                match tok_len {
+                    2 => Ok(Command::TtlSet(tokens[1].to_string(), None)),
                     _ => Err(CommandError::ArgumentMismatch)
                 }
             }
@@ -321,8 +327,8 @@ fn main() {
         map: HashMap::new()
     };
 
-    let listener = TcpListener::bind("127.0.0.1:2873").expect("Failed to bind to port 2873");
-    println!("Server listening on port 2873");
+    let listener = TcpListener::bind("127.0.0.1:53173").expect("Failed to bind to port 53173");
+    println!("Server listening on port 53173");
 
     let threadsafe_server_data = Arc::new(Mutex::new(server_data));
 
