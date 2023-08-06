@@ -1,335 +1,72 @@
 use std::{
-    time::SystemTime,
     collections::HashMap,
-    any::{Any, type_name},
     net::{TcpListener,TcpStream},
-    io::{Write, BufReader, BufRead}, sync::{Arc, Mutex, MutexGuard}, fmt::Display, str::FromStr
+    io::{Write, BufReader, BufRead}, sync::{Arc, Mutex, MutexGuard}, fmt::Display, str::FromStr, os, env
 };
 
+mod lib;
+
+use lib::smirk_map::SmirkMap;
+use lib::trie::Trie;
+use lib::smirk_search_mode::SmirkSearchMode;
 use regex::Regex;
+use lib::command::Command;
 
 #[derive(Debug)]
-enum SmirkSearchMode {
-    Glob,
-    Regex
+struct SmirkConfig {
+    port: u16,
+    number_of_dbs: u8,
+    max_threads: usize,
+    default_key_search_method: SmirkSearchMode
 }
 
-impl SmirkSearchMode {
-    fn from_ref(mode: &SmirkSearchMode) -> SmirkSearchMode {
-        match mode {
-            Self::Glob => Self::Glob,
-            Self::Regex => Self::Regex
+impl Default for SmirkConfig {
+    fn default() -> Self {
+        SmirkConfig {
+            port: 53173,
+            number_of_dbs: 1,
+            max_threads: num_cpus::get(),
+            default_key_search_method: SmirkSearchMode::Glob
         }
     }
 }
 
-struct SmirkMap {
-    search_mode: SmirkSearchMode,
-    map: HashMap<String, Record<Box<dyn Any + Send>>>
-}
+fn get_config() -> SmirkConfig {
+    let args: Vec<String> = env::args().collect();
+    let mut config = SmirkConfig::default();
 
-enum SmirkMessages {
-    /// Positive Messages :)
-    SetKey(String, String, String),
-    /// Negative Messages :(
-
-    /// The key wasn't found in the SmirkMap.
-    ///
-    /// `String` is the map key.
-    KeyNotFound(String),
-
-    /// This means the value stored in key `param1`
-    ///
-    ///
-    TypeMismatch(String, String),
-
-    ParseError(String, String, String)
-}
-
-impl ToString for SmirkMessages {
-    fn to_string(&self) -> String {
-        match self {
-            SmirkMessages::SetKey(
-                key,
-                registered_type_name,
-                desired_type_name
-            ) => format!(
-                "Set key \"{}\" successfully. Stored-Type: {}, User-Type: {}\n",
-                key,
-                registered_type_name,
-                desired_type_name
-            ),
-            SmirkMessages::KeyNotFound(key) => format!(
-                "Key \"{}\" not found.\n",
-                key
-            ),
-            Self::TypeMismatch(key, desired_type) => format!(
-                "Couldn't downcast the value stored in key \"{}\" to type \"{}\".\n",
-                key,
-                desired_type
-            ),
-            Self::ParseError(key, value, desired_type) => format!(
-                "Setting key \"{}\" failed. Could not parse \"{}\" into \"{}\".\n",
-                key,
-                value,
-                desired_type
-            )
-        }
-    }
-}
-
-impl SmirkMap {
-    /// Retrieves a value from the SmirkMap.
-    ///
-    /// # Arguments
-    ///
-    /// * `key`: A `&String` representing the key to be fetched.
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(&T)`: Returns &T, if key exists and is able to be downcast as T
-    ///
-    /// * `Err(String)`: The error message.
-    fn get<'a, T: 'static>(&'a self, key: &String) -> Result<&'a T, SmirkMessages> {
-        if let Some(record) = self.map.get(key) {
-            if let Some(real_value) = record.value.downcast_ref::<T>() {
-                return Ok(real_value);
+    if args.len() > 1 {
+        for i in 1..args.len() {
+            if args[i] == "--port" && i + 1 < args.len() {
+                config.port = args[i+1].parse().unwrap_or(config.port);
             }
-            return Err(SmirkMessages::TypeMismatch(String::from(key), type_name::<T>().to_string()));
-        }
-
-        return Err(SmirkMessages::KeyNotFound(String::from(key)));
-    }
-
-    /// Sets a value in the SmirkMap at key.
-    ///
-    /// # Arguments
-    ///
-    /// * `key`: A `&String` representing the key to be fetched.
-    ///
-    /// * `value`: A `T` value to be stored in the map with `key`.
-    fn set<'a, T: 'static + FromStr + Send>(
-        &mut self,
-        key: &String,
-        value: String,
-        desired_type_name: &String
-    ) -> Result<SmirkMessages, SmirkMessages>{
-        let parsed_value = value.parse::<T>();
-        if let Ok(value) = parsed_value {
-            let record: Record<Box<dyn Any + Send>> = Record {
-                value: Box::new(value),
-                ttl: None,
-                ttl_start: SystemTime::now(),
-                type_name: String::from(type_name::<T>()),
-                desired_type_name: String::from(desired_type_name)
-            };
-            self.map.insert(key.to_owned(), record);
-        } else if let Err(_) = parsed_value {
-            return Err(SmirkMessages::ParseError(String::from(key), value, String::from(type_name::<T>())));
-        }
-        return Ok(
-            SmirkMessages::SetKey(
-                String::from(key),
-                String::from(type_name::<T>()),
-                String::from(desired_type_name)
-            )
-        );
-    }
-    fn exists(&self, key: &String) -> bool {
-        return self.map.contains_key(key);
-    }
-    fn get_record(&self, key: &String) -> Result<&Record<Box<dyn Any + Send>>, SmirkMessages> {
-        if self.exists(key) {
-            return Ok(self.map.get(key).unwrap());
-        }
-
-        Err(SmirkMessages::KeyNotFound(key.clone()))
-    }
-    fn del(&mut self, key: &String) -> u64 {
-        if self.map.contains_key(key) {
-            self.map.remove(key);
-            1
-        } else {
-            0
-        }
-    }
-    fn ttl(&self, key: &String) -> Result<Option<u64>, String> {
-        if let Some(record) = self.map.get(key) {
-            return Ok(record.get_ttl());
-        }
-        Err(format!("Key \"{}\" was not found", key))
-    }
-    fn set_ttl(&mut self, key: &String, ttl: &Option<u64>) {
-        if let Some(record) = self.map.get_mut(key) {
-            record.ttl = *ttl;
-        }
-    }
-    fn search_mode(&mut self, mode: SmirkSearchMode) {
-        self.search_mode = mode;
-    }
-}
-
-struct Record<T> {
-    value: T,
-    ttl: Option<u64>,
-    ttl_start: SystemTime,
-    type_name: String,
-    desired_type_name: String
-}
-
-trait RecordLike<T> {
-    fn is_expired(&self) -> bool;
-    fn get_ttl(&self) -> Option<u64>;
-}
-
-impl<T> RecordLike<T> for Record<T> {
-    fn is_expired(&self) -> bool {
-        if let Some(ttl) = self.ttl  {
-            return SystemTime::now()
-                .duration_since(self.ttl_start)
-                .unwrap_or_default()
-                .as_secs() >= ttl;
-        }
-
-        false
-    }
-    fn get_ttl(&self) -> Option<u64> {
-
-        if let Some(ttl) = self.ttl  {
-            let duration = SystemTime::now()
-                .duration_since(self.ttl_start)
-                .unwrap_or_default()
-                .as_secs();
-            if duration >= ttl {
-                return Some(0);
+            else if args[i] == "--number-of-dbs" && i + 1 < args.len() {
+                config.number_of_dbs = args[i+1].parse().unwrap_or(config.number_of_dbs);
             }
-            return Some(ttl - duration);
-        }
-        None
-    }
-}
-
-#[derive(Debug)]
-enum Command {
-    Set(String, String, String),
-    Get(String, String),
-    Del(Vec<String>),
-    Keys(String),
-    Mode(SmirkSearchMode),
-    TtlGet(String),
-    TtlSet(String, Option<u64>),
-    Exists(String),
-    Type(String),
-    Quit,
-    Save
-}
-
-#[derive(Debug)]
-enum CommandError {
-    NoInput,
-    ArgumentMismatch,
-    Unknown,
-    NoValidModeSpecified,
-    InvalidTtlSpecified
-}
-
-impl FromStr for Command {
-    type Err = CommandError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let tokens: Vec<&str> = s.trim().split_whitespace().collect();
-        if tokens.is_empty() {
-            return Err(CommandError::NoInput);
-        }
-
-        let tok_len = tokens.len();
-        match tokens[0].to_uppercase().as_str() {
-            "SET" => {
-                if tok_len < 4 {
-                    return Err(CommandError::ArgumentMismatch);
-                }
-                Ok(Command::Set(tokens[1].to_string(), tokens[2].to_string(), tokens[3..].join(" ").to_string()))
+            else if args[i] == "--max-threads" && i + 1 < args.len() {
+                config.max_threads = args[i+1].parse().unwrap_or(config.max_threads);
             }
-            "GET" => {
-                if tok_len != 3 {
-                    return Err(CommandError::ArgumentMismatch);
-                }
-                Ok(Command::Get(tokens[1].to_string(), tokens[2].to_string()))
-            }
-            "DEL" => {
-                if tok_len < 2 {
-                    return Err(CommandError::ArgumentMismatch);
-                }
-                Ok(Command::Del(tokens[1..].into_iter().map(|a| {a.to_string()}).collect()))
-            }
-            "KEYS" => {
-                if tok_len != 2 {
-                    return Err(CommandError::ArgumentMismatch);
-                }
-                Ok(Command::Keys(tokens[1].to_string()))
-            }
-            "MODE" => {
-                if tok_len != 2 {
-                    return Err(CommandError::ArgumentMismatch);
-                }
-                match tokens[1].to_uppercase().as_str() {
-                    "GLOB" => Ok(Command::Mode(SmirkSearchMode::Glob)),
-                    "REGEX" => Ok(Command::Mode(SmirkSearchMode::Regex)),
-                    _ => Err(CommandError::NoValidModeSpecified)
+            else if args[i] == "--default-key-search-type" && i + 1 < args.len() {
+                config.default_key_search_method = match args[i+1].to_uppercase().as_str() {
+                    "REGEX" => SmirkSearchMode::Regex,
+                    _ => SmirkSearchMode::Glob
                 }
             }
-            "TTL" => {
-                match tok_len {
-                    2 => Ok(Command::TtlGet(tokens[1].to_string())),
-                    3 => {
-                        let ttl = tokens[2].to_owned().parse::<u64>();
-                        if let Ok(ttl) = ttl {
-                            Ok(Command::TtlSet(tokens[1].to_string(), Some(ttl)))
-                        } else {
-                            Err(CommandError::InvalidTtlSpecified)
-                        }
-                    }
-                    _ => Err(CommandError::ArgumentMismatch)
-                }
-            }
-            "DELTTL" => {
-                match tok_len {
-                    2 => Ok(Command::TtlSet(tokens[1].to_string(), None)),
-                    _ => Err(CommandError::ArgumentMismatch)
-                }
-            }
-            "EXISTS" => {
-                if tok_len != 2 {
-                    return Err(CommandError::ArgumentMismatch);
-                }
-                Ok(Command::Exists(tokens[1].to_string()))
-            }
-            "TYPE" => {
-                if tok_len != 2 {
-                    return Err(CommandError::ArgumentMismatch);
-                }
-                Ok(Command::Type(tokens[1].to_string()))
-            }
-            "QUIT" => {
-                Ok(Command::Quit)
-            }
-            "SAVE" => {
-                Ok(Command::Save)
-            }
-            _ => Err(CommandError::Unknown)
         }
     }
+    config
 }
 
 fn main() {
+    let config: SmirkConfig = get_config();
     let server_data = SmirkMap {
-        search_mode: SmirkSearchMode::Glob,
-        map: HashMap::new()
+        search_mode: config.default_key_search_method,
+        map: HashMap::new(),
+        trie: Trie::default()
     };
 
-    let listener = TcpListener::bind("127.0.0.1:53173").expect("Failed to bind to port 53173");
-    println!("Server listening on port 53173");
-
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", config.port)).expect(format!("Failed to bind to port {}", config.port).as_str());
+    println!("Server listening on port {}", config.port);
     let threadsafe_server_data = Arc::new(Mutex::new(server_data));
 
     for stream in listener.incoming() {
@@ -454,11 +191,18 @@ fn process_command(stream: &mut TcpStream, command: &Command, smirk_map: &mut Mu
                         let matched = matching_keys.join("\n");
                         stream.write_all(format!("{}\n", matched).as_bytes()).unwrap();
                     }
+                },
+                SmirkSearchMode::Trie => {
+
                 }
             }
         }
         Command::Mode(mode) => {
-            smirk_map.search_mode(SmirkSearchMode::from_ref(mode));
+            smirk_map.set_search_mode(match mode {
+                SmirkSearchMode::Glob => SmirkSearchMode::Glob,
+                SmirkSearchMode::Regex => SmirkSearchMode::Regex,
+                SmirkSearchMode::Trie => SmirkSearchMode::Trie
+            });
         }
         Command::TtlSet(key, ttl) => {
             smirk_map.set_ttl(key, ttl);
