@@ -3,62 +3,18 @@ use std::{
     net::{TcpListener,TcpStream},
     io::{Write, BufReader, BufRead}, sync::{Arc, Mutex, MutexGuard}, fmt::Display, str::FromStr, os, env
 };
-
 mod lib;
-
-use lib::smirk_map::SmirkMap;
+mod server;
+use lib::command::Command;
 use lib::trie::Trie;
 use lib::smirk_search_mode::SmirkSearchMode;
+use lib::smirk_map::SmirkMap;
+use server::smirk_config::SmirkConfig;
 use regex::Regex;
-use lib::command::Command;
 
-#[derive(Debug)]
-struct SmirkConfig {
-    port: u16,
-    number_of_dbs: u8,
-    max_threads: usize,
-    default_key_search_method: SmirkSearchMode
-}
-
-impl Default for SmirkConfig {
-    fn default() -> Self {
-        SmirkConfig {
-            port: 53173,
-            number_of_dbs: 1,
-            max_threads: num_cpus::get(),
-            default_key_search_method: SmirkSearchMode::Glob
-        }
-    }
-}
-
-fn get_config() -> SmirkConfig {
-    let args: Vec<String> = env::args().collect();
-    let mut config = SmirkConfig::default();
-
-    if args.len() > 1 {
-        for i in 1..args.len() {
-            if args[i] == "--port" && i + 1 < args.len() {
-                config.port = args[i+1].parse().unwrap_or(config.port);
-            }
-            else if args[i] == "--number-of-dbs" && i + 1 < args.len() {
-                config.number_of_dbs = args[i+1].parse().unwrap_or(config.number_of_dbs);
-            }
-            else if args[i] == "--max-threads" && i + 1 < args.len() {
-                config.max_threads = args[i+1].parse().unwrap_or(config.max_threads);
-            }
-            else if args[i] == "--default-key-search-type" && i + 1 < args.len() {
-                config.default_key_search_method = match args[i+1].to_uppercase().as_str() {
-                    "REGEX" => SmirkSearchMode::Regex,
-                    _ => SmirkSearchMode::Glob
-                }
-            }
-        }
-    }
-    config
-}
 
 fn main() {
-    let config: SmirkConfig = get_config();
+    let config: SmirkConfig = SmirkConfig::get_runtime_config();
     let server_data = SmirkMap {
         search_mode: config.default_key_search_method,
         map: HashMap::new(),
@@ -86,27 +42,56 @@ fn main() {
     }
 }
 
-fn get_value_and_write_to_stream<T: Display + 'static>(
+trait Streamable {
+    fn write_to_stream(&self, stream: &mut TcpStream);
+}
+
+macro_rules! impl_streamable_for_display {
+    ($($ty:ty),*) => {
+        $(
+            impl Streamable for $ty {
+                fn write_to_stream(&self, stream: &mut TcpStream) {
+                    write!(stream, "{}\n", self).unwrap();
+                }
+            }
+        )*
+    };
+}
+
+impl_streamable_for_display!(
+    i8, i16, i32, i64, i128, isize,
+    u8, u16, u32, u64, u128, usize,
+    f32, f64, bool, char, String
+);
+
+impl Streamable for Vec<u8> {
+    fn write_to_stream(&self, stream: &mut TcpStream) {
+        stream.write_all(self).unwrap();
+        stream.write_all("\n".as_bytes());
+    }
+}
+
+fn get_value_and_write_to_stream<T: Streamable + 'static>(
     stream: &mut TcpStream,
     smirk_map: &MutexGuard<'_, SmirkMap>,
     key: &String
 ) {
     let result = smirk_map.get::<T>(&key.to_owned());
     if let Ok(d) = result {
-        stream.write_all(format!("{}\n", d).as_bytes()).unwrap();
+        d.write_to_stream(stream);
     } else if let Err(s) = result {
         stream.write_all(s.to_string().as_bytes()).unwrap();
     }
 }
 
-fn set_value_and_write_to_stream<T: Display + Send + FromStr + 'static>(
+fn set_value_and_write_to_stream<T: Send + 'static>(
     stream: &mut TcpStream,
     smirk_map: &mut MutexGuard<'_, SmirkMap>,
     key: &String,
-    value: &String,
+    value: Vec<u8>,
     desired_type_name: &String
 ) {
-    let result = smirk_map.set::<T>(key, String::from(value), desired_type_name);
+    let result = smirk_map.set::<T>(key, value, desired_type_name);
     if let Ok(success) = result {
         stream.write_all(success.to_string().as_bytes()).unwrap();
     } else if let Err(e) = result {
@@ -118,23 +103,24 @@ fn process_command(stream: &mut TcpStream, command: &Command, smirk_map: &mut Mu
     match command {
         Command::Set(t, k, v) => {
             match t.as_str() {
-                "i8" => { set_value_and_write_to_stream::<i8>(stream, smirk_map, k, v, t); }
-                "i16" => { set_value_and_write_to_stream::<i16>(stream, smirk_map, k, v, t); }
-                "i32" => { set_value_and_write_to_stream::<i32>(stream, smirk_map, k, v, t); }
-                "i64" => { set_value_and_write_to_stream::<i64>(stream, smirk_map, k, v, t); }
-                "i128" => { set_value_and_write_to_stream::<i128>(stream, smirk_map, k, v, t); }
-                "u8" => { set_value_and_write_to_stream::<u8>(stream, smirk_map, k, v, t); }
-                "u16" => { set_value_and_write_to_stream::<u16>(stream, smirk_map, k, v, t); }
-                "u32" => { set_value_and_write_to_stream::<u32>(stream, smirk_map, k, v, t); }
-                "u64" => { set_value_and_write_to_stream::<u64>(stream, smirk_map, k, v, t); }
-                "u128" => { set_value_and_write_to_stream::<u128>(stream, smirk_map, k, v, t); }
-                "isize" => { set_value_and_write_to_stream::<isize>(stream, smirk_map, k, v, t); }
-                "usize" => { set_value_and_write_to_stream::<usize>(stream, smirk_map, k, v, t); }
-                "f32" => { set_value_and_write_to_stream::<f32>(stream, smirk_map, k, v, t); }
-                "f64" => { set_value_and_write_to_stream::<f64>(stream, smirk_map, k, v, t); }
-                "bool" => { set_value_and_write_to_stream::<bool>(stream, smirk_map, k, v, t); }
-                "char" => { set_value_and_write_to_stream::<char>(stream, smirk_map, k, v, t); }
-                _ => { set_value_and_write_to_stream::<String>(stream, smirk_map, k, v, t); }
+                "i8" => { set_value_and_write_to_stream::<i8>(stream, smirk_map, k, v.to_vec(), t); }
+                "i16" => { set_value_and_write_to_stream::<i16>(stream, smirk_map, k, v.to_vec(), t); }
+                "i32" => { set_value_and_write_to_stream::<i32>(stream, smirk_map, k, v.to_vec(), t); }
+                "i64" => { set_value_and_write_to_stream::<i64>(stream, smirk_map, k, v.to_vec(), t); }
+                "i128" => { set_value_and_write_to_stream::<i128>(stream, smirk_map, k, v.to_vec(), t); }
+                "u8" => { set_value_and_write_to_stream::<u8>(stream, smirk_map, k, v.to_vec(), t); }
+                "u16" => { set_value_and_write_to_stream::<u16>(stream, smirk_map, k, v.to_vec(), t); }
+                "u32" => { set_value_and_write_to_stream::<u32>(stream, smirk_map, k, v.to_vec(), t); }
+                "u64" => { set_value_and_write_to_stream::<u64>(stream, smirk_map, k, v.to_vec(), t); }
+                "u128" => { set_value_and_write_to_stream::<u128>(stream, smirk_map, k, v.to_vec(), t); }
+                "isize" => { set_value_and_write_to_stream::<isize>(stream, smirk_map, k, v.to_vec(), t); }
+                "usize" => { set_value_and_write_to_stream::<usize>(stream, smirk_map, k, v.to_vec(), t); }
+                "f32" => { set_value_and_write_to_stream::<f32>(stream, smirk_map, k, v.to_vec(), t); }
+                "f64" => { set_value_and_write_to_stream::<f64>(stream, smirk_map, k, v.to_vec(), t); }
+                "bool" => { set_value_and_write_to_stream::<bool>(stream, smirk_map, k, v.to_vec(), t); }
+                "char" => { set_value_and_write_to_stream::<char>(stream, smirk_map, k, v.to_vec(), t); }
+                "String" => { set_value_and_write_to_stream::<String>(stream, smirk_map, k, v.to_vec(), t); }
+                _ => { set_value_and_write_to_stream::<Vec<u8>>(stream, smirk_map, k, v.to_vec(), t); }
             }
         }
         Command::Get(t, k) => {
@@ -155,7 +141,8 @@ fn process_command(stream: &mut TcpStream, command: &Command, smirk_map: &mut Mu
                 "f64" => { get_value_and_write_to_stream::<f64>(stream, &smirk_map, k); }
                 "bool" => { get_value_and_write_to_stream::<bool>(stream, &smirk_map, k); }
                 "char" => { get_value_and_write_to_stream::<char>(stream, &smirk_map, k); }
-                _ => { get_value_and_write_to_stream::<String>(stream, &smirk_map, k); }
+                "String" => { get_value_and_write_to_stream::<String>(stream, &smirk_map, k); }
+                _ => { get_value_and_write_to_stream::<Vec<u8>>(stream, &smirk_map, k); }
             }
         }
         Command::Del(keys) => {
@@ -259,14 +246,14 @@ fn handle_client(stream: TcpStream, threadsafe_server_data: &Arc<Mutex<SmirkMap>
 
     let mut smirk_map = threadsafe_server_data.lock().unwrap();
     loop {
-        let mut line = String::new();
+        let mut line: Vec<u8> = Vec::new();
 
-        match bufreader.read_line(&mut line) {
+        match bufreader.read_until(b'\n', &mut line) {
             Ok(0) => {
                 break;
             }
             Ok(_) => {
-                let cmd = Command::from_str(line.as_str());
+                let cmd = Command::from_vec(line);
 
                 if let Ok(cmd) = cmd {
                     let mut sclone = stream.try_clone().unwrap();

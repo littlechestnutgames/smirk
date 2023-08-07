@@ -44,14 +44,13 @@ impl SmirkMap {
     /// * `key`: A `&String` representing the key to be fetched.
     ///
     /// * `value`: A `T` value to be stored in the map with `key`.
-    pub fn set<'a, T: 'static + FromStr + Send>(
+    pub fn set<'a, T: Send + 'static>(
         &mut self,
         key: &String,
-        value: String,
+        value: Vec<u8>,
         desired_type_name: &String
         ) -> Result<SmirkMessages, SmirkMessages>{
-        let parsed_value = value.parse::<T>();
-        if let Ok(value) = parsed_value {
+        // if let Ok(value) = parsed_value {
             let record: Record<Box<dyn Any + Send>> = Record {
                 value: Box::new(value),
                 ttl: None,
@@ -60,9 +59,9 @@ impl SmirkMap {
                 desired_type_name: String::from(desired_type_name)
             };
             self.map.insert(key.to_owned(), record);
-        } else if let Err(_) = parsed_value {
-            return Err(SmirkMessages::ParseError(String::from(key), value, String::from(type_name::<T>())));
-        }
+        // } else if let Err(_) = parsed_value {
+        //     return Err(SmirkMessages::ParseError(String::from(key), value, String::from(type_name::<T>())));
+        // }
         return Ok(
             SmirkMessages::SetKey(
                 String::from(key),
