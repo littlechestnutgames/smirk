@@ -14,7 +14,8 @@ pub enum Command {
     Exists(String),
     Type(String),
     Quit,
-    Save
+    Save,
+    Add(String,Vec<String>)
 }
 
 impl Command {
@@ -131,6 +132,22 @@ impl Command {
             }
             b"SAVE" => {
                 Ok(Command::Save)
+            }
+            b"ADD" => {
+                if tok_len < 2 {
+                    return Err(CommandError::ArgumentMismatch);
+                }
+                let ty = tokens[0];
+                let keys = tokens[1..]
+                            .into_iter()
+                            .map(|x| String::from_utf8_lossy(x).to_string())
+                            .collect();
+                Ok(
+                    Command::Add(
+                        String::from_utf8_lossy(ty).to_string(),
+                        keys
+                    )
+                )
             }
             _ => Err(CommandError::Unknown)
         }

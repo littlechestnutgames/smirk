@@ -1,5 +1,6 @@
 use std::any::{Any, type_name};
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::str::FromStr;
 use std::time::SystemTime;
 
@@ -37,6 +38,28 @@ impl SmirkMap {
         return Err(SmirkMessages::KeyNotFound(String::from(key)));
     }
 
+    pub fn binary_set(
+        &mut self,
+        key: &String,
+        value: Vec<u8>,
+        desired_type_name: &String,
+    ) -> Result<SmirkMessages, SmirkMessages> {
+        let record: Record<Box<dyn Any + Send + 'static>> = Record {
+            value: Box::new(value.clone()),
+            ttl: None,
+            ttl_start: SystemTime::now(),
+            type_name: "Vec<u8>".to_string(),
+            desired_type_name: desired_type_name.clone(),
+        };
+
+        self.map.insert(key.clone(), record);
+        Ok(SmirkMessages::SetKey(
+            key.clone(),
+            "Vec<u8>".to_string(),
+            desired_type_name.clone(),
+        ))
+    }
+
     /// Sets a value in the SmirkMap at key.
     ///
     /// # Arguments
@@ -49,8 +72,10 @@ impl SmirkMap {
         key: &String,
         value: Vec<u8>,
         desired_type_name: &String
-        ) -> Result<SmirkMessages, SmirkMessages>{
-        // if let Ok(value) = parsed_value {
+        ) -> Result<SmirkMessages, SmirkMessages> where T: FromStr {
+        let result: Result<T, <T as FromStr>::Err> =
+            String::from_utf8_lossy(&value).to_string().parse::<T>();
+        if let Ok(value) = result {
             let record: Record<Box<dyn Any + Send>> = Record {
                 value: Box::new(value),
                 ttl: None,
@@ -59,16 +84,16 @@ impl SmirkMap {
                 desired_type_name: String::from(desired_type_name)
             };
             self.map.insert(key.to_owned(), record);
-        // } else if let Err(_) = parsed_value {
-        //     return Err(SmirkMessages::ParseError(String::from(key), value, String::from(type_name::<T>())));
-        // }
-        return Ok(
-            SmirkMessages::SetKey(
-                String::from(key),
-                String::from(type_name::<T>()),
-                String::from(desired_type_name)
-                )
-            );
+            return Ok(
+                SmirkMessages::SetKey(
+                    String::from(key),
+                    String::from(type_name::<T>()),
+                    String::from(desired_type_name)
+                    )
+                );
+        } else {
+            return Err(SmirkMessages::ParseError(String::from(key), String::from_utf8_lossy(&value).to_string(), String::from(type_name::<T>())));
+        }
     }
     pub fn exists(&self, key: &String) -> bool {
         return self.map.contains_key(key);
@@ -101,5 +126,20 @@ impl SmirkMap {
     }
     pub fn set_search_mode(&mut self, mode: SmirkSearchMode) {
         self.search_mode = mode;
+    }
+    pub fn add<T: std::ops::Add<Output = T> + Default + Copy + 'static>(
+        &mut self,
+        keys: Vec<String>
+    ) -> Result<T, SmirkMessages> {
+        let mut total: T = T::default();
+        for key in keys {
+            if let Ok(val) = self.get::<T>(&key) {
+                let cloned_val = val.clone();
+                total = total + cloned_val;
+            } else {
+                return Err(SmirkMessages::ParseError(key, String::from("").to_string(), String::from(type_name::<T>()).to_string()));
+            }
+        }
+        return Ok(total);
     }
 }

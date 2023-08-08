@@ -12,3 +12,11 @@ cargo-watch = "8.4.0"
 glob = "0.3.1"
 num_cpus = "1.16.0"
 regex = "1.9.1"
+
+[[bin]]
+name = "smirk"
+path = "src/smirk.rs"
+
+[[bin]]
+name = "smirk-client"
+path = "src/client/main.rs"

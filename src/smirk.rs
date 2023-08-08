@@ -1,14 +1,15 @@
 use std::{
     collections::HashMap,
     net::{TcpListener,TcpStream},
-    io::{Write, BufReader, BufRead}, sync::{Arc, Mutex, MutexGuard}, fmt::Display, str::FromStr, os, env
+    io::{Write, BufReader, BufRead}, sync::{Arc, Mutex, MutexGuard}, str::FromStr, fmt::Display
 };
-mod lib;
+mod core;
 mod server;
-use lib::command::Command;
-use lib::trie::Trie;
-use lib::smirk_search_mode::SmirkSearchMode;
-use lib::smirk_map::SmirkMap;
+
+use crate::core::command::Command;
+use crate::core::trie::Trie;
+use crate::core::smirk_search_mode::SmirkSearchMode;
+use crate::core::smirk_map::SmirkMap;
 use server::smirk_config::SmirkConfig;
 use regex::Regex;
 
@@ -67,7 +68,7 @@ impl_streamable_for_display!(
 impl Streamable for Vec<u8> {
     fn write_to_stream(&self, stream: &mut TcpStream) {
         stream.write_all(self).unwrap();
-        stream.write_all("\n".as_bytes());
+        stream.write_all("\n".as_bytes()).unwrap();
     }
 }
 
@@ -84,7 +85,7 @@ fn get_value_and_write_to_stream<T: Streamable + 'static>(
     }
 }
 
-fn set_value_and_write_to_stream<T: Send + 'static>(
+fn set_value_and_write_to_stream<T: Send + FromStr + 'static>(
     stream: &mut TcpStream,
     smirk_map: &mut MutexGuard<'_, SmirkMap>,
     key: &String,
@@ -95,6 +96,34 @@ fn set_value_and_write_to_stream<T: Send + 'static>(
     if let Ok(success) = result {
         stream.write_all(success.to_string().as_bytes()).unwrap();
     } else if let Err(e) = result {
+        stream.write_all(e.to_string().as_bytes()).unwrap();
+    }
+}
+
+fn set_binary_value_and_write_to_stream(
+    stream: &mut TcpStream,
+    smirk_map: &mut MutexGuard<'_, SmirkMap>,
+    key: &String,
+    value: Vec<u8>,
+    desired_type_name: &String
+) {
+    let result = smirk_map.binary_set(key, value, desired_type_name);
+    if let Ok(success) = result {
+        stream.write_all(success.to_string().as_bytes()).unwrap();
+    } else if let Err(e) = result {
+        stream.write_all(e.to_string().as_bytes()).unwrap();
+    }
+}
+
+fn add_and_write_to_stream<T: std::ops::Add<Output = T> + Default + Copy + Display + 'static>(
+    stream: &mut TcpStream,
+    smirk_map: &mut MutexGuard<'_, SmirkMap>,
+    keys: Vec<String>
+) {
+    let total = smirk_map.add::<T>(keys);
+    if let Ok(total) = total {
+        stream.write_all(total.to_string().as_bytes()).unwrap();
+    } else if let Err(e) = total {
         stream.write_all(e.to_string().as_bytes()).unwrap();
     }
 }
@@ -120,7 +149,7 @@ fn process_command(stream: &mut TcpStream, command: &Command, smirk_map: &mut Mu
                 "bool" => { set_value_and_write_to_stream::<bool>(stream, smirk_map, k, v.to_vec(), t); }
                 "char" => { set_value_and_write_to_stream::<char>(stream, smirk_map, k, v.to_vec(), t); }
                 "String" => { set_value_and_write_to_stream::<String>(stream, smirk_map, k, v.to_vec(), t); }
-                _ => { set_value_and_write_to_stream::<Vec<u8>>(stream, smirk_map, k, v.to_vec(), t); }
+                _ => { set_binary_value_and_write_to_stream(stream, smirk_map, k, v.to_vec(), t); }
             }
         }
         Command::Get(t, k) => {
@@ -236,6 +265,25 @@ fn process_command(stream: &mut TcpStream, command: &Command, smirk_map: &mut Mu
             let shutdown = stream.shutdown(std::net::Shutdown::Both);
             if let Err(e) = shutdown {
                 stream.write_all(format!("Hmm. It seems like we're having problems shutting down the stream. {}", e).as_bytes()).unwrap();
+            }
+        }
+        Command::Add(t, k) => {
+            match t.as_str() {
+                "i8" => { add_and_write_to_stream::<i8>(stream, smirk_map, k.clone()) }
+                "i16" => { add_and_write_to_stream::<i16>(stream, smirk_map, k.clone())  }
+                "i32" => { add_and_write_to_stream::<i32>(stream, smirk_map, k.clone())  }
+                "i64" => { add_and_write_to_stream::<i64>(stream, smirk_map, k.clone())  }
+                "i128" => { add_and_write_to_stream::<i128>(stream, smirk_map, k.clone())  }
+                "isize" => { add_and_write_to_stream::<isize>(stream, smirk_map, k.clone())  }
+                "u8" => { add_and_write_to_stream::<u8>(stream, smirk_map, k.clone())  }
+                "u16" => { add_and_write_to_stream::<u16>(stream, smirk_map, k.clone())  }
+                "u32" => { add_and_write_to_stream::<u32>(stream, smirk_map, k.clone())  }
+                "u64" => { add_and_write_to_stream::<u64>(stream, smirk_map, k.clone())  }
+                "u128" => { add_and_write_to_stream::<u128>(stream, smirk_map, k.clone())  }
+                "usize" => { add_and_write_to_stream::<usize>(stream, smirk_map, k.clone())  }
+                "f32" => { add_and_write_to_stream::<f32>(stream, smirk_map, k.clone())  }
+                "f64" => { add_and_write_to_stream::<f64>(stream, smirk_map, k.clone())  }
+                _ => { }
             }
         }
     }
