@@ -1,6 +1,6 @@
 use std::env;
 
-use crate::core::smirk_search_mode::SmirkSearchMode;
+use smirk::core::smirk_search_mode::SmirkSearchMode;
 
 #[derive(Debug)]
 pub struct SmirkConfig {

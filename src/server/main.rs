@@ -3,12 +3,12 @@ use std::{
     net::{TcpListener,TcpStream},
     io::{Write, BufReader, BufRead}, sync::{Arc, Mutex, MutexGuard}, str::FromStr, fmt::Display
 };
-mod core;
+
 mod smirk_config;
-use crate::core::command::Command;
-use crate::core::trie::Trie;
-use crate::core::smirk_search_mode::SmirkSearchMode;
-use crate::core::smirk_map::SmirkMap;
+use smirk::core::command::Command;
+use smirk::core::trie::Trie;
+use smirk::core::smirk_search_mode::SmirkSearchMode;
+use smirk::core::smirk_map::SmirkMap;
 use smirk_config::SmirkConfig;
 use regex::Regex;
 
