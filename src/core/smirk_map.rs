@@ -1,8 +1,9 @@
 use std::any::{Any, type_name};
 use std::collections::HashMap;
-use std::ops::Deref;
 use std::str::FromStr;
 use std::time::SystemTime;
+
+use num::CheckedAdd;
 
 use super::smirk_messages::SmirkMessages;
 use super::smirk_search_mode::SmirkSearchMode;
@@ -127,7 +128,7 @@ impl SmirkMap {
     pub fn set_search_mode(&mut self, mode: SmirkSearchMode) {
         self.search_mode = mode;
     }
-    pub fn add<T: std::ops::Add<Output = T> + Default + Copy + 'static>(
+    pub fn add_float<T: std::ops::Add<Output = T> + Default + Copy + 'static>(
         &mut self,
         keys: Vec<String>
     ) -> Result<T, SmirkMessages> {
@@ -136,6 +137,26 @@ impl SmirkMap {
             if let Ok(val) = self.get::<T>(&key) {
                 let cloned_val = val.clone();
                 total = total + cloned_val;
+            } else {
+                return Err(SmirkMessages::ParseError(key, String::from("").to_string(), String::from(type_name::<T>()).to_string()));
+            }
+        }
+        return Ok(total);
+    }
+
+    pub fn add<T: CheckedAdd<Output = T> + Default + 'static>(
+        &mut self,
+        keys: Vec<String>
+    ) -> Result<T, SmirkMessages> {
+        let mut total: T = T::default();
+        for key in keys {
+            if let Ok(val) = self.get::<T>(&key) {
+                let t = val.checked_add(&total);
+                if let Some(new_total) = t {
+                   total = new_total;
+                } else {
+                    return Err(SmirkMessages::AddOverflowError());
+                }
             } else {
                 return Err(SmirkMessages::ParseError(key, String::from("").to_string(), String::from(type_name::<T>()).to_string()));
             }

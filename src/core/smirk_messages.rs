@@ -13,12 +13,14 @@ pub enum SmirkMessages {
     ///
     TypeMismatch(String, String),
 
-    ParseError(String, String, String)
+    ParseError(String, String, String),
+    AddOverflowError()
 }
 
 impl ToString for SmirkMessages {
     fn to_string(&self) -> String {
         match self {
+            SmirkMessages::AddOverflowError() => "Cannot add these. It's an overflow.\n".to_owned(),
             SmirkMessages::SetKey(
                 key,
                 registered_type_name,

@@ -5,6 +5,7 @@ use std::{
 };
 
 mod smirk_config;
+use num::{CheckedAdd, BigInt};
 use smirk::core::command::Command;
 use smirk::core::trie::Trie;
 use smirk::core::smirk_search_mode::SmirkSearchMode;
@@ -61,7 +62,7 @@ macro_rules! impl_streamable_for_display {
 impl_streamable_for_display!(
     i8, i16, i32, i64, i128, isize,
     u8, u16, u32, u64, u128, usize,
-    f32, f64, bool, char, String
+    f32, f64, bool, char, String, BigInt
 );
 
 impl Streamable for Vec<u8> {
@@ -114,7 +115,20 @@ fn set_binary_value_and_write_to_stream(
     }
 }
 
-fn add_and_write_to_stream<T: std::ops::Add<Output = T> + Default + Copy + Display + 'static>(
+fn add_float_and_write_to_stream<T: std::ops::Add<Output = T> + Default + Copy + Display + 'static>(
+    stream: &mut TcpStream,
+    smirk_map: &mut MutexGuard<'_, SmirkMap>,
+    keys: Vec<String>
+) {
+    let total = smirk_map.add_float::<T>(keys);
+    if let Ok(total) = total {
+        stream.write_all(total.to_string().as_bytes()).unwrap();
+    } else if let Err(e) = total {
+        stream.write_all(e.to_string().as_bytes()).unwrap();
+    }
+}
+
+fn add_and_write_to_stream<T: CheckedAdd<Output = T> + Default + Display + 'static>(
     stream: &mut TcpStream,
     smirk_map: &mut MutexGuard<'_, SmirkMap>,
     keys: Vec<String>
@@ -143,6 +157,7 @@ fn process_command(stream: &mut TcpStream, command: &Command, smirk_map: &mut Mu
                 "u128" => { set_value_and_write_to_stream::<u128>(stream, smirk_map, k, v.to_vec(), t); }
                 "isize" => { set_value_and_write_to_stream::<isize>(stream, smirk_map, k, v.to_vec(), t); }
                 "usize" => { set_value_and_write_to_stream::<usize>(stream, smirk_map, k, v.to_vec(), t); }
+                "BigInt" => { set_value_and_write_to_stream::<BigInt>(stream, smirk_map, k, v.to_vec(), t); }
                 "f32" => { set_value_and_write_to_stream::<f32>(stream, smirk_map, k, v.to_vec(), t); }
                 "f64" => { set_value_and_write_to_stream::<f64>(stream, smirk_map, k, v.to_vec(), t); }
                 "bool" => { set_value_and_write_to_stream::<bool>(stream, smirk_map, k, v.to_vec(), t); }
@@ -165,6 +180,7 @@ fn process_command(stream: &mut TcpStream, command: &Command, smirk_map: &mut Mu
                 "u128" => { get_value_and_write_to_stream::<u128>(stream, &smirk_map, k); }
                 "isize" => { get_value_and_write_to_stream::<isize>(stream, &smirk_map, k); }
                 "usize" => { get_value_and_write_to_stream::<usize>(stream, &smirk_map, k); }
+                "BigInt" => { get_value_and_write_to_stream::<BigInt>(stream, &smirk_map, k); }
                 "f32" => { get_value_and_write_to_stream::<f32>(stream, &smirk_map, k); }
                 "f64" => { get_value_and_write_to_stream::<f64>(stream, &smirk_map, k); }
                 "bool" => { get_value_and_write_to_stream::<bool>(stream, &smirk_map, k); }
@@ -280,8 +296,9 @@ fn process_command(stream: &mut TcpStream, command: &Command, smirk_map: &mut Mu
                 "u64" => { add_and_write_to_stream::<u64>(stream, smirk_map, k.clone())  }
                 "u128" => { add_and_write_to_stream::<u128>(stream, smirk_map, k.clone())  }
                 "usize" => { add_and_write_to_stream::<usize>(stream, smirk_map, k.clone())  }
-                "f32" => { add_and_write_to_stream::<f32>(stream, smirk_map, k.clone())  }
-                "f64" => { add_and_write_to_stream::<f64>(stream, smirk_map, k.clone())  }
+                "BigInt" => { add_and_write_to_stream::<BigInt>(stream, smirk_map, k.clone())  }
+                "f32" => { add_float_and_write_to_stream::<f32>(stream, smirk_map, k.clone())  }
+                "f64" => { add_float_and_write_to_stream::<f64>(stream, smirk_map, k.clone())  }
                 _ => { }
             }
         }
