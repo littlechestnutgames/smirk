@@ -4,13 +4,12 @@ use std::{
     io::{Write, BufReader, BufRead}, sync::{Arc, Mutex, MutexGuard}, str::FromStr, fmt::Display
 };
 mod core;
-mod server;
-
+mod smirk_config;
 use crate::core::command::Command;
 use crate::core::trie::Trie;
 use crate::core::smirk_search_mode::SmirkSearchMode;
 use crate::core::smirk_map::SmirkMap;
-use server::smirk_config::SmirkConfig;
+use smirk_config::SmirkConfig;
 use regex::Regex;
 
 

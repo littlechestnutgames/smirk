@@ -14,8 +14,8 @@ num_cpus = "1.16.0"
 regex = "1.9.1"
 
 [[bin]]
-name = "smirk"
-path = "src/smirk.rs"
+name = "smirk-server"
+path = "src/server/main.rs"
 
 [[bin]]
 name = "smirk-client"
