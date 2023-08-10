@@ -92,7 +92,8 @@ impl Command {
                 match mode.as_slice() {
                     b"GLOB" => Ok(Command::Mode(SmirkSearchMode::Glob)),
                     b"REGEX" => Ok(Command::Mode(SmirkSearchMode::Regex)),
-                    _ => Err(CommandError::NoValidModeSpecified)
+                    b"TRIE" => Ok(Command::Mode(SmirkSearchMode::Trie)),
+                    m => { println!("{:?}", m); return Err(CommandError::NoValidModeSpecified); }
                 }
             }
             b"TTL" => {

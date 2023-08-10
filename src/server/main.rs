@@ -94,6 +94,7 @@ fn set_value_and_write_to_stream<T: Send + FromStr + 'static>(
 ) {
     let result = smirk_map.set::<T>(key, value, desired_type_name);
     if let Ok(success) = result {
+        smirk_map.trie.insert(key);
         stream.write_all(success.to_string().as_bytes()).unwrap();
     } else if let Err(e) = result {
         stream.write_all(e.to_string().as_bytes()).unwrap();
@@ -109,6 +110,7 @@ fn set_binary_value_and_write_to_stream(
 ) {
     let result = smirk_map.binary_set(key, value, desired_type_name);
     if let Ok(success) = result {
+        smirk_map.trie.insert(key);
         stream.write_all(success.to_string().as_bytes()).unwrap();
     } else if let Err(e) = result {
         stream.write_all(e.to_string().as_bytes()).unwrap();
@@ -191,6 +193,9 @@ fn process_command(stream: &mut TcpStream, command: &Command, smirk_map: &mut Mu
         }
         Command::Del(keys) => {
             let deleted: u64 = keys.into_iter().map(|k| smirk_map.del(k)).sum();
+            for key in keys {
+                smirk_map.trie.remove(key);
+            }
             stream.write_all(format!("{}", deleted).as_bytes()).unwrap();
         }
         Command::Keys(key) => {
@@ -224,7 +229,14 @@ fn process_command(stream: &mut TcpStream, command: &Command, smirk_map: &mut Mu
                     }
                 },
                 SmirkSearchMode::Trie => {
-
+                    let results = smirk_map.trie.get_keys_with_prefix(key.as_str());
+                    if results.len() == 0 {
+                        stream.write_all(format!("No matches for key query \"{}\" were found.\n", key).as_bytes()).unwrap();
+                    } else {
+                        for result in results {
+                            stream.write_all(format!("{}\n", result).as_bytes()).unwrap();
+                        }
+                    }
                 }
             }
         }

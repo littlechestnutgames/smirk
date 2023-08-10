@@ -12,7 +12,7 @@ pub struct SmirkConfig {
 
 impl Default for SmirkConfig {
     fn default() -> Self {
-        SmirkConfig {
+        Self {
             port: 53173,
             number_of_dbs: 1,
             max_threads: num_cpus::get(),
