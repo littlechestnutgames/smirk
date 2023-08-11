@@ -8,12 +8,12 @@ use num::CheckedAdd;
 use super::smirk_messages::SmirkMessages;
 use super::smirk_search_mode::SmirkSearchMode;
 use super::record::{ Record, RecordLike };
-use super::trie::Trie;
+use trie::Trie;
 
 pub struct SmirkMap {
     pub search_mode: SmirkSearchMode,
     pub map: HashMap<String, Record<Box<dyn Any + Send>>>,
-    pub trie: Trie
+    pub trie: Trie<String>
 }
 
 impl SmirkMap {
@@ -85,6 +85,7 @@ impl SmirkMap {
                 desired_type_name: String::from(desired_type_name)
             };
             self.map.insert(key.to_owned(), record);
+            self.trie.add(key, Some("".to_string()));
             return Ok(
                 SmirkMessages::SetKey(
                     String::from(key),
@@ -109,6 +110,7 @@ impl SmirkMap {
     pub fn del(&mut self, key: &String) -> u64 {
         if self.map.contains_key(key) {
             self.map.remove(key);
+            self.trie.remove(key);
             1
         } else {
             0

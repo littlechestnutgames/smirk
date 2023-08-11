@@ -942,6 +942,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09fc20d2ca12cb9f044c93e3bd6d32d523e6e2ec3db4f7b2939cd99026ecd3f0"
 
 [[package]]
+name = "littlechestnutgames-trie"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b793ee940964fff86023d64d1c1332251dabbab6610ed252337a8537ba72e83e"
+
+[[package]]
 name = "log"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1609,6 +1615,7 @@ version = "0.1.0"
 dependencies = [
  "cargo-watch",
  "glob",
+ "littlechestnutgames-trie",
  "num",
  "num_cpus",
  "regex",
